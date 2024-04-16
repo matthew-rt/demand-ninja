@@ -1,8 +1,10 @@
+# %%
 import numpy as np
 import demand_ninja
 import pyproj as proj
 import datetime
 import pandas as pd
+import matplotlib.pyplot as plt
 
 
 class demand:
@@ -18,7 +20,7 @@ class demand:
         datapathway,
         weatherdatapathway,
         ASHPprofilepath="profiles/",
-        populationgridfile=None,
+        populationsitelocs=None,
         desiredpopulation=61389177,
         yearmin=2010,
         yearmax=2010,
@@ -35,26 +37,27 @@ class demand:
         self.datapathway = datapathway
         self.weatherdatapathway = weatherdatapathway
         self.weathersitelocs = np.loadtxt(
-            weatherdatapathway + "sitelocs.csv", delimiter=",", skiprows=1
+            weatherdatapathway + "/site_locs.csv", delimiter=",", skiprows=1
         )
         self.ASHPprofilepath = ASHPprofilepath
-        self.populationgridfile = populationgridfile
+        self.populationsitelocs = populationsitelocs
         self.startdatetime = datetime.datetime(yearmin, 1, 1)
-        self.enddatetime = datetime.datetime(yearmax + 1, 1, 1) - datetime.timedelta(
-            hours=1
-        )
+        self.enddatetime = datetime.datetime(yearmax + 1, 1, 1)
+
         self.DHWtemp = DHWtemp
-        if self.populationgridfile == None:
+        if self.populationsitelocs == None:
             self.generatepopulationsitelocs()
         else:
             self.popsitelocs = np.loadtxt(
-                f"{self.datapathway}/{self.populationgridfile}",
+                f"{self.datapathway}/{self.populationsitelocs}",
                 delimiter=",",
                 skiprows=1,
             )
         currentpopulation = np.sum(self.popsitelocs[:, 3])
         scalingfactor = currentpopulation / desiredpopulation
         self.popsitelocs[:, 3] = self.popsitelocs[:, 3] / scalingfactor
+        self.generatedailydemand()
+        self.generateASHPdemand()
 
     def generatedailydemand(self):
         """This function calculates the daily degree days, BAIT and COPs for each site location, and then generates the daily demand time series.
@@ -65,7 +68,7 @@ class demand:
         hdds = []
         dhwCOPs = []
         heatingCOPs = []
-        temps = []
+        alltemps = []
         popsums = []
 
         for i in range(len(self.popsitelocs)):
@@ -77,11 +80,13 @@ class demand:
                 with open(f"{self.weatherdatapathway}/{code}.csv") as f:
                     data = f.read().strip().split("\n")
                     startdate = datetime.datetime.strptime(
-                        data[1].split(",")[0], "%d/%m/%Y %H:%M"
+                        data[1].split(",")[0], "%Y-%m-%d %H:%M:%S"
                     )
-                startindex = (startdate - self.startdatetime).days * 24
-                endindex = (self.enddatetime - startdate).days * 24
-
+                startindex = int(
+                    (self.startdatetime - startdate).total_seconds() // 3600
+                )
+                endindex = int((self.enddatetime - startdate).total_seconds() // 3600)
+                print(f"Start index: {startindex}, End index: {endindex}")
             data = np.loadtxt(
                 f"{self.weatherdatapathway}/{code}.csv",
                 delimiter=",",
@@ -94,7 +99,8 @@ class demand:
                 dayreshape = data[:, i].reshape(-1, 24)
                 daydata.append(np.mean(dayreshape, axis=1))
 
-            temps, humid, wind, solar = daydata
+            solar, temps, humid, wind = daydata
+            temps = temps - 273.15  # convert to celsius
             dataframe = pd.DataFrame(
                 {
                     "temperature": temps,
@@ -104,7 +110,6 @@ class demand:
                 }
             )
             # convert temperature to celsius
-            dataframe["temperature"] = dataframe["temperature"] - 273.15
             # convert humidity to g/kg
             dataframe["humidity"] = dataframe["humidity"] * 1000
 
@@ -122,24 +127,74 @@ class demand:
             dhwCOP = 3.5 - 0.05 * DHWtempdelta + 0.0005 * DHWtempdelta**2
             heatingCOPs.append(heatingCOP)
             dhwCOPs.append(dhwCOP)
-            temps.append(dataframe["temperature"])
+            alltemps.append(dataframe["temperature"])
 
         # for every day, we average the values, using a population weighted average
 
         self.averagedhdds = np.average(hdds, axis=0, weights=popsums)
         self.averagedheatingCOPs = np.average(heatingCOPs, axis=0, weights=popsums)
         self.averageddhwCOPs = np.average(dhwCOPs, axis=0, weights=popsums)
-        self.averagedtemps = np.average(temps, axis=0, weights=popsums)
+        self.averagedtemps = np.average(alltemps, axis=0, weights=popsums)
 
         heatingpower = 140  # from demand ninja paper
         self.pbase = 20  # from analysis of base gas demand
         # the predicted demand is in GW, and we want to convert it to GWh, so we multiply by 24
         self.dailyvariableheatingdemand = [
-            np.sum(popsums) * i * heatingpower / (10**9) for i in self.averagedhdds
+            np.sum(popsums) * i * 24 * heatingpower / (10**9) for i in self.averagedhdds
         ]
         self.flatDHWdemand = (
             24 * 20 * 0.45
         )  # based on finding that DHW demand is 45% of base demand, from other analysis
+
+    def generateASHPdemand(self):
+        # hourly DHW profiles derived from the work of Watson
+        DHWprofile = np.loadtxt(f"{self.ASHPprofilepath}/hourlyDHW.csv", delimiter=",")
+        ASHPprofiles = np.loadtxt(
+            f"{self.ASHPprofilepath}/hourlyASHP.csv", delimiter=",", skiprows=1
+        )
+        # ASHPs are used differently at different temperatures, so Watson's data has
+        # a range of different profiles
+
+        heatbounds = [
+            [-4.5, -1.5],
+            [-1.5, 1.5],
+            [1.5, 4.5],
+            [4.5, 7.5],
+            [7.5, 10.5],
+            [10.5, 13.5],
+            [13.5, 16.5],
+            [16.5, 1000],
+        ]
+
+        # we're using population weighted averages. Future work might work on a regional basis
+
+        # variable heating demand, COPs and temps should all be the same length
+        totaldemandtimeseries = []
+        dhwdemandtimeseries = []
+        ASHPelecdemandtimeseries = []
+        for i in range(len(self.averagedtemps)):
+            temp = self.averagedtemps[i]
+            heatingCOP = self.averagedheatingCOPs[i]
+            dhwCOP = self.averageddhwCOPs[i]
+            heatingdemand = self.dailyvariableheatingdemand[i]
+            DHWdemand = self.flatDHWdemand
+            for j, bounds in enumerate(heatbounds):
+                if temp >= bounds[0] and temp < bounds[1]:
+                    heatingprofile = ASHPprofiles[:, j]
+                    print(f"Using profile {j}")
+                    break
+            DHWdemand = (DHWdemand / dhwCOP) * DHWprofile
+            heatingdemand = (heatingdemand / heatingCOP) * heatingprofile
+            totaldemand = heatingdemand + DHWdemand
+            totaldemandtimeseries.append(totaldemand)
+            dhwdemandtimeseries.append(DHWdemand)
+            ASHPelecdemandtimeseries.append(heatingdemand)
+        totaldemandtimeseries = np.hstack(totaldemandtimeseries)
+        dhwdemandtimeseries = np.hstack(dhwdemandtimeseries)
+        ASHPelecdemandtimeseries = np.hstack(ASHPelecdemandtimeseries)
+        self.totaldemandtimeseries = totaldemandtimeseries
+        self.dhwdemandtimeseries = dhwdemandtimeseries
+        self.ASHPelecdemandtimeseries = ASHPelecdemandtimeseries
 
     def generatepopulationsitelocs(self):
         with open(
@@ -218,3 +273,27 @@ class demand:
             for i in popsitelocs:
                 file.write(f"{i[0]},{i[1]},{i[2]},{i[3]}\n")
         self.popsitelocs = popsitelocs
+
+
+# %%
+if __name__ == "__main__":
+    b = demand(
+        "demanddata",
+        "D:/solar-humid-temp-wind-comb",
+        ASHPprofilepath="demanddata/profiles/",
+        populationsitelocs="populationsitelocs.csv",
+        yearmin=2015,
+        yearmax=2015,
+        DHWtemp=50,
+    )
+    plt.plot(b.totaldemandtimeseries)
+    plt.show()
+# %%
+# plot first 4 days on top of each other
+for i in range(4):
+    daydata = b.totaldemandtimeseries[i * 24 : (i + 1) * 24]
+    normeddaydata = daydata / np.sum(daydata)
+    plt.plot(normeddaydata, label=f"Day {i+1}")
+plt.legend()
+plt.show()
+# %%
