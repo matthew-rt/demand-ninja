@@ -279,15 +279,39 @@ class demand:
 if __name__ == "__main__":
     b = demand(
         "demanddata",
-        "D:/solar-humid-temp-wind-comb",
+        "/Volumes/macdrive/solar-humid-temp-wind-comb",
         ASHPprofilepath="demanddata/profiles/",
         populationsitelocs="populationsitelocs.csv",
-        yearmin=2015,
-        yearmax=2015,
+        yearmin=2013,
+        yearmax=2019,
         DHWtemp=50,
     )
-    plt.plot(b.totaldemandtimeseries)
-    plt.show()
+
+    # %%
+    totaldemandseries = b.totaldemandtimeseries
+    yearlyaveragedemand = np.sum(totaldemandseries) / (
+        len(totaldemandseries) / (24 * 365)
+    )
+    print(f"Yearly average demand: {yearlyaveragedemand/1000} TWh")
+    averagedemandminusheating = 570 - yearlyaveragedemand / 1000
+    # %%
+    loadeddemanddata = np.loadtxt(
+        "/Users/matt/code/SCORES/data/demand.csv", delimiter=",", skiprows=1, usecols=2
+    )
+    averageelecdemand = (
+        np.sum(loadeddemanddata) / (len(loadeddemanddata) / (24 * 365)) / 10**6
+    )
+    scalingfactor = averageelecdemand / averagedemandminusheating
+    loadeddemanddata = loadeddemanddata / scalingfactor
+    # %%
+    combineddemand = totaldemandseries * 1000 + loadeddemanddata
+    currentdate = datetime.datetime(2013, 1, 1)
+    with open("2013-2019demand.csv", "w") as f:
+        f.write("datetime,Demand(MW)\n")
+        for i in combineddemand:
+            datestring = currentdate.strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"{datestring},{i}\n")
+            currentdate += datetime.timedelta(hours=1)
 # %%
 # plot first 4 days on top of each other
 for i in range(4):
