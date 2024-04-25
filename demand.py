@@ -143,7 +143,7 @@ class demand:
             np.sum(popsums) * i * 24 * heatingpower / (10**9) for i in self.averagedhdds
         ]
         self.flatDHWdemand = (
-            24 * 20 * 0.45
+            24 * self.pbase * 0.45
         )  # based on finding that DHW demand is 45% of base demand, from other analysis
 
     def generateASHPdemand(self):
@@ -181,7 +181,6 @@ class demand:
             for j, bounds in enumerate(heatbounds):
                 if temp >= bounds[0] and temp < bounds[1]:
                     heatingprofile = ASHPprofiles[:, j]
-                    print(f"Using profile {j}")
                     break
             DHWdemand = (DHWdemand / dhwCOP) * DHWprofile
             heatingdemand = (heatingdemand / heatingCOP) * heatingprofile
@@ -279,7 +278,7 @@ class demand:
 if __name__ == "__main__":
     b = demand(
         "demanddata",
-        "/Volumes/macdrive/solar-humid-temp-wind-comb",
+        "D:/solar-humid-temp-wind-comb",
         ASHPprofilepath="demanddata/profiles/",
         populationsitelocs="populationsitelocs.csv",
         yearmin=2013,
@@ -288,16 +287,96 @@ if __name__ == "__main__":
     )
 
     # %%
-    totaldemandseries = b.totaldemandtimeseries
-    yearlyaveragedemand = np.sum(totaldemandseries) / (
-        len(totaldemandseries) / (24 * 365)
+    from scipy.optimize import curve_fit
+
+    demanddata = np.loadtxt(
+        "c:/Users/SA0011/Documents/data/demand.csv",
+        delimiter=",",
+        skiprows=1,
+        usecols=2,
     )
-    print(f"Yearly average demand: {yearlyaveragedemand/1000} TWh")
-    averagedemandminusheating = 570 - yearlyaveragedemand / 1000
+    starttime = datetime.datetime(2009, 1, 1)
+    selectionstart = datetime.datetime(2017, 1, 1)
+    hoursbetween = int((selectionstart - starttime).total_seconds() // 3600)
+    demanddata = demanddata[hoursbetween:]
+    # the data is in hour long periods: we want a daily average, so we reshape
+    # to a row of 24 hour periods, and then take the mean of each row
+    demanddata = demanddata.reshape(-1, 24)
+    demanddata = np.mean(demanddata, axis=1)
     # %%
-    loadeddemanddata = np.loadtxt(
-        "/Users/matt/code/SCORES/data/demand.csv", delimiter=",", skiprows=1, usecols=2
-    )
+    Hdds = b.averagedhdds
+    # save the hdds as a numpy file
+    np.save("hdds.npy", Hdds)
+    # save the demand data
+    np.save("demanddata.npy", demanddata)
+    quit()
+    # these are the daily degree days between 2013-2019: we want the
+    # average daily degree days for 2017-2019
+    Hdds = Hdds[-len(demanddata) :]
+
+    print(len(Hdds), len(demanddata))
+    # we need to make an array which is 0 on weekdays, and 1 on weekends
+    # the first day of 2017 was a sunday
+    weekenddirac = np.zeros(len(demanddata))
+    sundayindices = np.arange(0, len(demanddata), 7)
+    mondayindices = np.arange(1, len(demanddata), 7)
+    tuesdayindices = np.arange(2, len(demanddata), 7)
+    wednesdayindices = np.arange(3, len(demanddata), 7)
+    thursdayindices = np.arange(4, len(demanddata), 7)
+    fridayindices = np.arange(5, len(demanddata), 7)
+    saturdayindices = np.arange(6, len(demanddata), 7)
+
+    weekenddirac[saturdayindices] = 1
+    weekenddirac[sundayindices] = 1
+
+    def func(x, Pbase, Pheat, weekendfactor):
+        return Pbase + Pheat * x + weekendfactor * weekenddirac
+
+    popt, pcov = curve_fit(func, Hdds, demanddata)
+
+    predictedvals = func(Hdds, *popt)
+    # find correlation coefficient
+    r = np.corrcoef(predictedvals, demanddata)[0, 1]
+    print(r)
+    # print(popt)
+    plt.plot(demanddata, label="Actual demand")
+    plt.plot(func(Hdds, *popt), label="Predicted demand")
+
+    plt.xlabel("Days")
+    plt.ylabel("Demand (MW)")
+    # now we want to plot the days of the week on a scatter overlaying the data
+
+    # the first day of 2017 was a sunday
+    sundayindices = np.arange(0, len(demanddata), 7)
+    mondayindices = np.arange(1, len(demanddata), 7)
+    tuesdayindices = np.arange(2, len(demanddata), 7)
+    wednesdayindices = np.arange(3, len(demanddata), 7)
+    thursdayindices = np.arange(4, len(demanddata), 7)
+    fridayindices = np.arange(5, len(demanddata), 7)
+    saturdayindices = np.arange(6, len(demanddata), 7)
+
+    sundaydata = demanddata[sundayindices]
+    mondaydata = demanddata[mondayindices]
+    tuesdaydata = demanddata[tuesdayindices]
+    wednesdaydata = demanddata[wednesdayindices]
+    thursdaydata = demanddata[thursdayindices]
+    fridaydata = demanddata[fridayindices]
+    saturdaydata = demanddata[saturdayindices]
+
+    plt.scatter(sundayindices, sundaydata, label="Sunday")
+    plt.scatter(mondayindices, mondaydata, label="Monday")
+    plt.scatter(tuesdayindices, tuesdaydata, label="Tuesday")
+    plt.scatter(wednesdayindices, wednesdaydata, label="Wednesday")
+    plt.scatter(thursdayindices, thursdaydata, label="Thursday")
+    plt.scatter(fridayindices, fridaydata, label="Friday")
+    plt.scatter(saturdayindices, saturdaydata, label="Saturday")
+
+    plt.legend()
+    plt.title("Predicted vs Actual Daily Demand 2017-2019")
+    plt.show()
+
+    # %%
+
     averageelecdemand = (
         np.sum(loadeddemanddata) / (len(loadeddemanddata) / (24 * 365)) / 10**6
     )
